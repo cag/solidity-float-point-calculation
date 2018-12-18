@@ -60,3 +60,5 @@ typings/
 # vscode
 .vscode
 
+# Truffle build
+build/

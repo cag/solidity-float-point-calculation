@@ -4,8 +4,7 @@
   "description": "Bankex foundation Solidity float point repository",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "test": "node tests.js"
+    "test": "truffle test"
   },
   "repository": {
     "type": "git",
@@ -13,16 +12,9 @@
   },
   "author": "shamatar",
   "license": "MIT",
-  "dependencies": {
-    "coinstring": "^2.3.0",
-    "ejs": "^2.5.7",
-    "ejs-locals": "^1.0.2",
-    "ethereumjs-testrpc": "^6.0.3",
-    "moment": "^2.18.1",
-    "solc": "^0.4.18",
-    "truffle-artifactor": "^3.0.0",
-    "truffle-contract": "^3.0.1",
-    "web3": "^0.20.1",
-    "zeppelin-solidity": "^1.2.0"
+  "dependencies": {},
+  "devDependencies": {
+    "mp-wasm": "^0.3.0",
+    "truffle": "^5.0.0-beta.2"
   }
 }
