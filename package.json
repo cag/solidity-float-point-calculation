@@ -14,7 +14,11 @@
   "license": "MIT",
   "dependencies": {},
   "devDependencies": {
-    "mp-wasm": "^0.3.0",
+    "eslint": "^5.10.0",
+    "eslint-config-prettier": "^3.3.0",
+    "eslint-plugin-prettier": "^3.0.0",
+    "mp-wasm": "^0.4.0",
+    "prettier": "1.15.3",
     "truffle": "^5.0.0-beta.2"
   }
 }
