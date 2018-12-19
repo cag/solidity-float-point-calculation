@@ -65,7 +65,7 @@ contract("FloatMath", function(accounts) {
   });
 
   it("can encode and decode", async function() {
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < 10; i++) {
       const x = toBN(randomHex(32)).sub(pow2To255);
       assert.equal(
         await floatMath.initFromInt(x),
@@ -76,8 +76,8 @@ contract("FloatMath", function(accounts) {
   });
 
   it("operates correctly with zero", async function() {
-    const zero = await floatMath.initFromInt(0);
-    const x = await floatMath.initFromInt(10);
+    const zero = toBytes32(0);
+    const x = toBytes32(10);
     assert.equal(await floatMath.add(zero, x), x);
     assert.equal(await floatMath.add(x, zero), x);
     assert.equal(await floatMath.sub(x, zero), x);
@@ -86,10 +86,36 @@ contract("FloatMath", function(accounts) {
     assert.equal(await floatMath.div(zero, x), zero);
   });
 
-  it("can add");
-  it("can sub");
-  it("can mul");
-  it("can div");
+  it("can add, sub, mul, and div", async function() {
+    const genParams = () => [
+      -Infinity,
+      Infinity,
+      NaN,
+      0,
+      -1,
+      1,
+      Math.random(),
+      (Math.random() - 0.5) *
+        Math.pow(2, Math.ceil(Math.random() * 2048 - 1024))
+    ];
+    for (let i = 0; i < 10; i++) {
+      for (const [op, opSym] of [
+        ["add", "+"],
+        ["sub", "-"],
+        ["mul", "*"],
+        ["div", "/"]
+      ]) {
+        for (const x of genParams())
+          for (const y of genParams())
+            assert.equal(
+              await floatMath[op](toBytes32(x), toBytes32(y)),
+              toBytes32(mpf[op](x, y)),
+              `${x} ${opSym} ${y} mismatch`
+            );
+      }
+    }
+  });
+
   it("can log2");
   it("can get the reciprocal of the square root");
 });
