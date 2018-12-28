@@ -1,455 +1,231 @@
-pragma solidity ^0.4.18;
+pragma solidity ^0.5.1;
 
-contract FloatMath {
-    
-    uint256 constant SIGNIF_BITS = 236;
-    uint256 constant EXP_BITS = 19;
-    uint256 constant SIGN_BITS = 1;
-    
-    uint256 constant EXP_MIN = 0;
-    uint256 constant EXP_BIAS = 262143;
-    uint256 constant EXP_MAX = 524287;
-    
-    uint256 constant INT128_MAX = (uint256(1) << 127) - 1;
-    uint256 constant INT128_MIN = (uint256(1) << 127);
-    
-    // bytes32 constant SIGN_REMOVAL_MASK = bytes32((uint256(2) << 19) - 1);
-    
-    uint256 constant SIGNIF_MAX = (uint256(2) << SIGNIF_BITS) - 1;
-    uint256 constant SIGNIF_MIN = (uint256(1) << SIGNIF_BITS);
-    bytes32 constant SIGNIF_MAX_BYTES = bytes32(SIGNIF_MAX);
-    bytes32 constant SIGNIF_MIN_BYTES = bytes32(SIGNIF_MIN);
-
-    bytes32 constant ZERO_BYTES = bytes32(0);
-
-    uint256 constant INV_SQRT_MAGIC = uint256(bytes32(0x5fffe6eb50c7b537a9cd9f02e504fcfbfd9ec519e04e8f0a29d961d2aaeb2223));
-
-
-    // uint256 constant MAX_MULTIPLICATION_BITS = uint256(15);    
-    // uint256 constant MAX_MULTIPLICATION_DIVISOR = (uint(2) << MAX_MULTIPLICATION_BITS);
-    
-    
-    function toArray(bytes32 a) public pure returns (uint256[3] memory result) {
-        if (a == ZERO_BYTES) {
-            return result;
-        }
-        uint256 newSign = uint256(a >> 255);
-        uint256 newExp = uint256((a << SIGN_BITS) >> (SIGNIF_BITS+SIGN_BITS));
-        // uint256 newExp = uint256((a >> SIGNIF_BITS) & SIGN_REMOVAL_MASK);
-        // uint256 newExp = uint256((a >> SIGNIF_BITS));
-        uint256 newSignif = uint256((a << (EXP_BITS + SIGN_BITS)) >> (EXP_BITS + SIGN_BITS)) + SIGNIF_MIN;
-        return [newSign, newExp, newSignif];
+library FloatMath {
+    // https://ethereum.stackexchange.com/a/45488 on why rnd is a uint everywhere
+    enum RoundingMode {
+        RoundTiesToEven,
+        RoundTowardZero,
+        RoundTowardPositive,
+        RoundTowardNegative
     }
-    
-    function fromArray(uint256[3] _array) public pure returns (bytes32 packed) {
-        if (_array[0] == 0 && _array[1] == 0 && _array[2] == 0) {
-            return ZERO_BYTES;
-        }
-        bytes32 packedSign = bytes32(_array[0] << 255);
-        bytes32 packedExp = bytes32(_array[1] << SIGNIF_BITS);
-        bytes32 packedSignif = bytes32(_array[2]) ^ SIGNIF_MIN_BYTES;    
-        packed = packedSign | packedExp | packedSignif;
-    }
-    
-    function add(bytes32 a, bytes32 b) public pure returns (bytes32 result) {
-        uint256[3] memory aArray = toArray(a);
-        uint256[3] memory bArray = toArray(b);
-        return fromArray(addArrays(aArray, bArray));
-    }
-    
-    function addArrays(uint256[3] aArray, uint256[3] bArray) internal pure returns (uint256[3] memory result) {
-        if (aArray[0] == 0 && aArray[1] == 0 && aArray[2] == 0) {
-            return bArray;
-        }
-        if (bArray[0] == 0 && bArray[1] == 0 && bArray[2] == 0) {
-            return aArray;
-        }
-        uint256 newExp = aArray[1];
-        uint256 expA = aArray[1];
-        uint256 expB = bArray[1];
-        uint256 signifA = aArray[2];
-        uint256 signifB = bArray[2];
-        uint256 signA = aArray[0];
-        uint256 signB = bArray[0];
-        uint256 newSignif = 0;
-        uint256 newSign = 0;
+    uint constant NUM_ROUNDING_MODES = uint(RoundingMode.RoundTowardNegative) + 1;
 
-        if (expB > expA) {
-            newExp = expB;
-            signifA = signifA >> (expB - expA);
-        } else if (expA > expB) {
-            signifB = signifB >> (expA - expB);
+    uint constant S_MASK = 1 << 255;
+    uint constant E_MAX = 0x7ffff;
+    uint constant E_BIAS = 0x3ffff;
+    uint constant E_SHIFT = 236;
+    uint constant E_MASK = E_MAX << E_SHIFT;
+    uint constant F_LIMIT = (1 << E_SHIFT);
+    uint constant F_MASK = F_LIMIT - 1;
+
+    // http://pages.cs.wisc.edu/~markhill/cs354/Fall2008/notes/flpt.apprec.html
+    // see: on Rounding
+    uint constant FGRS_LIMIT = F_LIMIT << 3;
+    uint constant FGRS_MASK = FGRS_LIMIT - 1;
+
+    function toParts(bytes32 x) internal pure returns (uint s, uint e, uint f) {
+        e = (uint(x) & E_MASK) >> E_SHIFT;
+        f = uint(x) & F_MASK;
+        if(e > 0)
+            f |= F_LIMIT;
+        else if(f != 0)
+            e = 1;
+
+        return (uint(x) & S_MASK, e, f);
+    }
+
+    function normalizeInternal(uint s, uint e, uint fgrs, uint rnd) internal pure returns (bytes32) {
+        require(rnd < NUM_ROUNDING_MODES, "unsupported rounding mode");
+        if(e >= E_MAX)
+            return bytes32(s | E_MASK);
+
+        if(fgrs == 0)
+            return bytes32(s);
+
+        while(fgrs >= FGRS_LIMIT * 2 && e < E_MAX) {
+            fgrs = (fgrs >> 1) | (fgrs & 1);
+            e++;
         }
-        
-        if (signA + signB == 2) {
-            newSign = 1;
-            newSignif = signifA + signifB;
-        } else if (signA == 1) {
-            if (signifA > signifB) {
-                newSignif = signifA - signifB;
-                newSign = 1;
-            } else if (signifB >= signifA) {
-                newSignif = signifB - signifA;
-                newSign = 0;
-            }
-        } else if (signB == 1) {
-            if (signifB > signifA) {
-                newSignif = signifB - signifA;
-                newSign = 1;
-            } else if (signifA >= signifB) {
-                newSignif = signifA - signifB;
-                newSign = 0;
-            }
+        while(fgrs < FGRS_LIMIT && e > 0) {
+            fgrs <<= 1;
+            e--;
+        }
+        fgrs &= FGRS_MASK;
+
+        if(
+            // https://stackoverflow.com/a/8984135
+            (RoundingMode(rnd) == RoundingMode.RoundTiesToEven && (fgrs & 4 == 0 || fgrs & 3 == 0 && fgrs & 8 == 0)) ||
+            (RoundingMode(rnd) == RoundingMode.RoundTowardZero) ||
+            (RoundingMode(rnd) == RoundingMode.RoundTowardPositive && (s != 0 || fgrs & 7 == 0)) ||
+            (RoundingMode(rnd) == RoundingMode.RoundTowardNegative && (s == 0 || fgrs & 7 == 0))
+        ) {
+            fgrs >>= 3;
         } else {
-            newSignif = signifA + signifB;
-            newSign = 0;
-        }
-        if (newSignif == 0) {
-            return [uint256(0), uint256(0), uint256(0)];
-        }
-        while (newSignif > SIGNIF_MAX) {
-            newSignif = newSignif >> 1;
-            newExp++;
-        }
-        while (newSignif < SIGNIF_MIN) {
-            newSignif = newSignif << 1;
-            newExp--;
-        }        
-        return [newSign, newExp, newSignif];
-    }
-   
-
-    function negate(bytes32 a) public pure returns (bytes32 result) {
-        if (a == ZERO_BYTES) {
-            return a;
-        }
-        return a ^ bytes32(uint256(1) << 255);
-    } 
-
-    function negateArray(uint256[3] aArray) internal pure returns (uint256[3] memory result) {
-        if (aArray[0] == 0 && aArray[1] == 0 && aArray[2] == 0) {
-            return aArray;
-        }
-        return [(aArray[0] + 1 )%2, aArray[1], aArray[2]];
-    }
- 
-    function sub(bytes32 a, bytes32 b) public pure returns (bytes32 result) {
-        uint256[3] memory aArray = toArray(a);
-        uint256[3] memory bArray = toArray(negate(b));
-        return fromArray(addArrays(aArray, bArray));
-    }
-    
-    function subArrays(uint256[3] aArray, uint256[3] _bArray) internal pure returns (uint256[3] memory result) {
-        if (aArray[0] == 0 && aArray[1] == 0 && aArray[2] == 0) {
-            return negateArray(_bArray);
-        }
-        if (_bArray[0] == 0 && _bArray[1] == 0 && _bArray[2] == 0) {
-            return aArray;
-        }
-        uint256[3] memory bArray = negateArray(_bArray);
-        return addArrays(aArray, bArray);
-    }
-  
-    function mul(bytes32 a, bytes32 b) public pure returns (bytes32 result) {
-        uint256[3] memory aArray = toArray(a);
-        uint256[3] memory bArray = toArray(b);
-        return fromArray(mulArrays(aArray, bArray));
-    }
-    
-    function mulArrays(uint256[3] aArray, uint256[3] bArray) internal pure returns (uint256[3] memory result) {
-        if (aArray[0] == 0 && aArray[1] == 0 && aArray[2] == 0) {
-            return [uint256(0), uint256(0), uint256(0)];
-        }
-        if (bArray[0] == 0 && bArray[1] == 0 && bArray[2] == 0) {
-            return [uint256(0), uint256(0), uint256(0)];
-        }
-        uint256 newSign = (aArray[0] + bArray[0]) % 2;
-        uint256 newExp = (aArray[1] + bArray[1]) - EXP_BIAS;
-        if (newExp > EXP_MAX) {
-            revert();
-            newExp = EXP_MAX;
-            newSignif = SIGNIF_MAX;
-            return [newSign, newExp, newSignif];
+            fgrs = (fgrs >> 3) + 1;
+            if(fgrs >= F_LIMIT && e < E_MAX) {
+                fgrs &= FGRS_MASK;
+                e++;
+            }
         }
 
-        uint256 topA = aArray[2] >> (SIGNIF_BITS >> 1);
-        uint256 botA = aArray[2] << (255 - (SIGNIF_BITS >> 1)) >> 256;
+        if(e == E_MAX)
+            fgrs = 0; // infinity
 
-        uint256 topB = bArray[2] >> (SIGNIF_BITS >> 1);
-        uint256 botB = bArray[2] << (255 - (SIGNIF_BITS >> 1)) >> 256;
-
-        uint256 bottomMul = botA*botB;
-        uint256 midMul = topA*botB + botA*topB;
-        uint256 newSignif = topA*topB;
-
-        midMul = midMul + (bottomMul >> (SIGNIF_BITS >> 1));
-        newSignif = newSignif + (midMul >> (SIGNIF_BITS >> 1));
-
-        while (newSignif > SIGNIF_MAX) {
-            newSignif = newSignif >> 1;
-            newExp++;
-        }
-        return [newSign, newExp, newSignif];
-    }   
-    
-    function fastInvSqrt(bytes32 a) public pure returns (bytes32 result) {
-        require(compare(a, ZERO_BYTES) == 1);
-        uint256 tmp = INV_SQRT_MAGIC - (uint256(a) >> 1);
-        uint256[3] memory THREEHALFS = toArray(0x3FFFF80000000000000000000000000000000000000000000000000000000000);
-        uint256[3] memory resArray = toArray(bytes32(tmp));
-        uint256[3] memory resDivByTwo = toArray(a);
-        resDivByTwo[1] = resDivByTwo[1]-1;
-        resArray = mulArrays(resArray, subArrays(THREEHALFS, mulArrays(resDivByTwo, mulArrays(resArray, resArray) ) ) ); 
-        // resArray = mulArrays(resArray, subArrays(THREEHALFS, mulArrays(resDivByTwo, mulArrays(resArray, resArray) ) ) );
-        return fromArray(resArray);
-        // y = y * (threehalfs - (x2 * y * y));
-
+        return bytes32(s | (e << E_SHIFT) | fgrs);
     }
 
-    function div(bytes32 a, bytes32 b) public pure returns (bytes32 result) {
-        if (b == ZERO_BYTES) {
-            revert();
+    function fromInt(int x, uint rnd) public pure returns (bytes32) {
+        if(x == 0) {
+            return bytes32(0);
         }
-        if (compare(ZERO_BYTES, b) == 1) {
-            bytes32 _b = negate(b);
-            _b = mul(a, mul(fastInvSqrt(_b),fastInvSqrt(_b)));
-            return negate(_b);
-        }
-        return mul(fastInvSqrt(b), mul(a,fastInvSqrt(b)));
-    }
-    
-    function divArrays(uint256[3] aArray, uint256[3] bArray) internal pure returns (uint256[3] memory result) {
-        if (aArray[0] == 0 && aArray[1] == 0 && aArray[2] == 0) {
-            return [uint256(0), uint256(0), uint256(0)];
-        }
-        if (bArray[0] == 0 && bArray[1] == 0 && bArray[2] == 0) {
-            revert();
-        }
-        bytes32 a = fromArray(aArray);
-        bytes32 b = fromArray(bArray);
-        return toArray(div(a,b));
-    }    
 
-    
-    function divNaive(bytes32 a, bytes32 b) public pure returns (bytes32 result) {
-        uint256[3] memory aArray = toArray(a);
-        uint256[3] memory bArray = toArray(b);
-        return fromArray(divNaiveArrays(aArray, bArray));
-    }
-    
-    function divNaiveArrays(uint256[3] aArray, uint256[3] bArray) internal pure returns (uint256[3] memory result) {
-        if (aArray[0] == 0 && aArray[1] == 0 && aArray[2] == 0) {
-            return [uint256(0), uint256(0), uint256(0)];
-        }
-        if (bArray[0] == 0 && bArray[1] == 0 && bArray[2] == 0) {
-            revert();
-        }
-        uint256 expA = aArray[1];
-        uint256 expB = bArray[1];
-        uint256 signifA = aArray[2];
-        uint256 signifB = bArray[2];
-        uint256 signA = aArray[0];
-        uint256 signB = bArray[0];
-        uint256 newExp = EXP_BIAS + expA - expB;
-        assert(newExp > EXP_MIN && newExp < EXP_MAX);
-        uint256 newSign = (signA + signB) % 2;
-        uint256 newSignif = 0;
-        uint256 cop = signifA;
-        if (signifA < signifB) {
-            cop = cop << 1;
-            newExp--;
-        }
-        uint256 shift = SIGNIF_BITS;
-        for (uint256 i = 0; i < SIGNIF_BITS; i++) {
-            newSignif += (cop/signifB) << shift;
-            shift--;
-            cop = (cop % signifB) << 1;
-        }
-        return [newSign, newExp, newSignif];
-    }    
-
-    function compare(bytes32 a, bytes32 b) public pure returns (int8 result) {
-        uint256[3] memory aArray = toArray(a);
-        uint256[3] memory bArray = toArray(b);
-        return compareArrays(aArray, bArray);
-    }
-    
-    function compareArrays(uint256[3] aArray, uint256[3] bArray) internal pure returns (int8 result) {
-        if (aArray[0]==0 && bArray[0] == 0) {
-            return compareAbsArrays(aArray, bArray);
-        } else if (aArray[0]==1 && bArray[0] == 1) {
-            return -compareAbsArrays(aArray, bArray);
-        } else if (aArray[0] > bArray[0]) {
-            return -1;
-        }
-        return 1;
-    }
-
-    function compareAbs(bytes32 a, bytes32 b) public pure returns (int8 result) {
-        uint256[3] memory aArray = toArray(a);
-        uint256[3] memory bArray = toArray(b);
-        return compareAbsArrays(aArray, bArray);
-    }
-
-    function compareAbsArrays(uint256[3] aArray, uint256[3] bArray) internal pure returns (int8 result) {
-        if (aArray[1] > bArray[1]) {
-            return 1;
-        } else if (aArray[1] < bArray[1]) {
-            return -1;
+        uint s = uint(x) & S_MASK;
+        uint f;
+        if(s == 0) {
+            f = uint(x);
         } else {
-            if (aArray[2] > bArray[2]) {
-                return 1;
-            } else if (aArray[2] < bArray[2]) {
-                return -1;
-            }
+            f = uint(-x);
         }
-        return 0;
+
+        uint e = E_SHIFT + E_BIAS + 3;
+
+        return normalizeInternal(s, e, f, rnd);
     }
 
-    function log2bytes(bytes32 a) public pure returns (bytes32 result) {
-        uint256[3] memory aArray = toArray(a);
-        return fromArray(log2Array(aArray));
-    }
-    
-    function log2Array(uint256[3] aArray) internal pure returns (uint256[3] memory result) {
-        require(aArray[0] == 0);
-        result = initFromIntToArray(int256(aArray[1]) - int256(EXP_BIAS));
-        uint256[3] memory ONE = initFromIntToArray(1);
-        uint256[3] memory TWO = initFromIntToArray(2);
-        uint256[3] memory tmp = initFromIntToArray(int256(aArray[2]));
-        uint256[3] memory ZERO = [uint256(0), uint256(0), uint256(0)];
-        tmp[1] = tmp[1] - SIGNIF_BITS;
-        uint256 numIterations = 16;
-        for (uint256 i = 1; i <= numIterations; i++) {
-            tmp = mulArrays(tmp, tmp);
-            ZERO = mulArrays(ZERO, TWO);
-            if (i==0) {
-                return tmp;
-            }
-            if (compareArrays(tmp, TWO) == 1) {
-                ZERO = addArrays(ZERO, ONE);
-                tmp[1] = tmp[1] - 1;
-            }
-        }
-        ZERO[1] = ZERO[1] - numIterations;
-        // ZERO[1] = divArrays(ZERO, initFromIntToArray(int256(uint256(1) << numIterations)));
-        result = addArrays(result, ZERO);
-        return result;
+    function isNaN(bytes32 x) internal pure returns (bool) {
+        return uint(x) & E_MASK == E_MASK && uint(x) & F_MASK != 0;
     }
 
-    function initFromInt(int256 a) public pure returns (bytes32 result) {
-        if (a == 0) {
-            return ZERO_BYTES;
+    function addParts(uint xS, uint xE, uint xF, uint yS, uint yE, uint yF, uint rnd) internal pure returns (bytes32) {
+        if(xE < yE || xE == yE && xF < yF) {
+            (xS, xE, xF, yS, yE, yF) = (yS, yE, yF, xS, xE, xF);
+        } else if(xS != yS && xE == yE && xF == yF) {
+            return bytes32(0);
         }
-        uint256[3] memory tmp = initFromIntToArray(a);
-        return fromArray(tmp);
+
+        uint dE = xE - yE;
+        xF <<= 3;
+        if(dE < 3)
+            yF <<= (3 - dE);
+        else {
+            // NOTE: sticky bit does not kick in until
+            // after radix alignment in MPFR implementation
+            // but this does not match the IEEE 754 behavior,
+            // which accounts for vast differences in size
+            // when rounding.
+            if(yF & ((1 << (dE - 3)) - 1) == 0)
+                yF >>= (dE - 3);
+            else
+                yF = (yF >> (dE - 3)) | 1;
+        }
+
+        if(xS == yS) {
+            return normalizeInternal(xS, xE, xF + yF, rnd);
+        } else {
+            return normalizeInternal(xS, xE, xF - yF, rnd);
+        }
     }
-    
-    function initFromIntToArray(int256 a) internal pure returns (uint256[3] memory result) {
-        if (a==0) {
-            return result;
-        }
-        int256 abs = a;
-        uint256 newSign = 0;
-        if (abs < 0) {
-            newSign = 1;
-            abs = -abs; 
-        }
-        uint256 newExp = EXP_BIAS + SIGNIF_BITS;
-        uint256 newSignif = uint256(abs);
-        while (newSignif > SIGNIF_MAX) {
-            newSignif = newSignif >> 1;
-            newExp++;
-        }
-        while (newSignif < SIGNIF_MIN) {
-            newSignif = newSignif << 1;
-            newExp--;
-        }
-        assert(newSignif >= SIGNIF_MIN && newSignif <= SIGNIF_MAX);
-        assert(newExp < EXP_MAX && newExp > EXP_MIN);
-        return [newSign, newExp, newSignif];
+
+    function add(bytes32 x, bytes32 y, uint rnd) public pure returns (bytes32) {
+        if(isNaN(x)) return x;
+        if(isNaN(y)) return y;
+
+        (uint xS, uint xE, uint xF) = toParts(x);
+        (uint yS, uint yE, uint yF) = toParts(y);
+        return addParts(xS, xE, xF, yS, yE, yF, rnd);
     }
-    
-    // function toInt(bytes32 a) public pure returns (int128 result, int128 multiplier, int128 divisor) {
-    //     uint256[3] memory tmp = toArray(a);
-    //     return toIntFromArray(tmp);
-    // }
-    
-    // function toIntFromArray(uint256[3] a) public pure returns (int128 result, int128 multiplier, int128 divisor) {
-    //     uint256 shiftedMantisa = a[2];
-    //     uint256 requiredShifts = a[1];
-    //     multiplier = 1;
-    //     divisor = 1;
-    //     if (requiredShifts >= EXP_BIAS) {
-    //         requiredShifts = requiredShifts - EXP_BIAS;
-    //         if (a[0] == 0) {
-    //             while (shiftedMantisa > INT128_MAX) {
-    //                 shiftedMantisa = shiftedMantisa >> 1;
-    //                 requiredShifts--;
-    //             }
-    //         } else {
-    //             while (shiftedMantisa > INT128_MIN) {
-    //                 shiftedMantisa = shiftedMantisa >> 1;
-    //                 requiredShifts--;
-    //             }
-    //         }
-    //         if (requiredShifts < 127) {
-    //             result = int128(shiftedMantisa);
-    //             if (a[0] == 1) {
-    //                 result = -result;
-    //             }
-    //             multiplier = multiplier << requiredShifts;
-    //         } else {
-    //             while (requiredShifts >= 127) {
-    //                 if (shiftedMantisa % 2 == 1) {
-    //                     return (0, -1, -1);
-    //                 }
-    //                 shiftedMantisa = shiftedMantisa >> 1;
-    //                 requiredShifts--;
-    //             } 
-    //             result = int128(shiftedMantisa);
-    //             if (a[0] == 1) { 
-    //                 result = -result;
-    //             }
-    //             multiplier = multiplier << requiredShifts;
-    //         }
-    //     } else {
-    //         requiredShifts = EXP_BIAS - requiredShifts;
-    //         if (a[0] == 0) {
-    //             while (shiftedMantisa > INT128_MAX) {
-    //                 shiftedMantisa = shiftedMantisa >> 1;
-    //                 requiredShifts--;
-    //             }
-    //         } else {
-    //             while (shiftedMantisa > INT128_MIN) {
-    //                 shiftedMantisa = shiftedMantisa >> 1;
-    //                 requiredShifts--;
-    //             }
-    //         }
-    //         if (requiredShifts < 127) {
-    //             result = int128(shiftedMantisa);
-    //             if (a[0] == 1) {
-    //                 result = -result;
-    //             }
-    //             divisor = divisor << requiredShifts;
-    //         } else {
-    //             while (requiredShifts >= 127) {
-    //                 if (shiftedMantisa % 2 == 1) {
-    //                     return (0, -1, -1);
-    //                 }
-    //                 shiftedMantisa = shiftedMantisa >> 1;
-    //                 requiredShifts--;
-    //             } 
-    //             result = int128(shiftedMantisa);
-    //             if (a[0] == 1) {
-    //                 result = -result;
-    //             }
-    //             divisor = divisor << requiredShifts;
-    //         }
-    //     }
-    //     return (result, multiplier, divisor);
-    // }
-    
+
+    function sub(bytes32 x, bytes32 y, uint rnd) public pure returns (bytes32) {
+        if(isNaN(x)) return x;
+        if(isNaN(y)) return y;
+
+        (uint xS, uint xE, uint xF) = toParts(x);
+        (uint yS, uint yE, uint yF) = toParts(y);
+        return addParts(xS, xE, xF, yS ^ S_MASK, yE, yF, rnd);
+    }
+
+    uint constant MUL_LOW_LENGTH = E_SHIFT + 1 - 128;
+    uint constant MUL_LOW_MASK = (1 << MUL_LOW_LENGTH) - 1;
+    uint constant MUL_E_OFFSET = E_BIAS + 15;
+
+    function mul(bytes32 x, bytes32 y, uint rnd) public pure returns (bytes32) {
+        if(isNaN(x)) return x;
+        if(isNaN(y)) return y;
+
+        (uint xS, uint xE, uint xF) = toParts(x);
+        (uint yS, uint yE, uint yF) = toParts(y);
+
+        uint xF0 = (xF & MUL_LOW_MASK);
+        uint yF0 = (yF & MUL_LOW_MASK);
+        xF >>= MUL_LOW_LENGTH;
+        yF >>= MUL_LOW_LENGTH;
+        uint xyF0 = xF0 * yF0;
+        uint xyF1 = (xyF0 >> MUL_LOW_LENGTH) + (xF * yF0 & MUL_LOW_MASK) + (xF0 * yF & MUL_LOW_MASK);
+        xF = (xyF1 >> MUL_LOW_LENGTH) + xF * yF + (xF * yF0 >> MUL_LOW_LENGTH) + (xF0 * yF >> MUL_LOW_LENGTH);
+        xyF1 &= MUL_LOW_MASK;
+        xyF0 &= MUL_LOW_MASK;
+
+        xE += yE;
+        if(xE >= MUL_E_OFFSET) {
+            if(xyF1 != 0 || xyF0 != 0) {
+                xF |= 1;
+            }
+            xE -= MUL_E_OFFSET;
+        } else {
+            if(xF != 0 || xyF1 != 0 || xyF0 != 0) {
+                revert("subnormal numbers not implemented yet");
+            }
+            xE = 0;
+        }
+
+        return normalizeInternal(xS ^ yS, xE, xF, rnd);
+    }
+
+    // I adapted this from Fast Division of Large Integers by Karl Hasselström
+    // Algorithm 3.4: Divide-and-conquer division (3 by 2)
+    // Karl got it from Burnikel and Ziegler and the GMP lib implementation
+    function div256_128By256(uint a21, uint a0, uint b)
+        internal
+        pure
+        returns (uint q, uint r)
+    {
+        uint qhi = (a21 / b) << 128;
+        a21 %= b;
+
+        uint shift = 0;
+        while(b >> shift > 0) shift++;
+        shift = 256 - shift;
+        a21 = (a21 << shift) + (shift > 128 ? a0 << (shift - 128) : a0 >> (128 - shift));
+        a0 = (a0 << shift) & 2**128-1;
+        b <<= shift;
+        (uint b1, uint b0) = (b >> 128, b & 2**128-1);
+
+        uint rhi;
+        q = a21 / b1;
+        rhi = a21 % b1;
+
+        uint rsub0 = (q & 2**128-1) * b0;
+        uint rsub21 = (q >> 128) * b0 + (rsub0 >> 128);
+        rsub0 &= 2**128-1;
+
+        while(rsub21 > rhi || rsub21 == rhi && rsub0 > a0) {
+            q--;
+            a0 += b0;
+            rhi += b1 + (a0 >> 128);
+            a0 &= 2**128-1;
+        }
+
+        q += qhi;
+        r = (((rhi - rsub21) << 128) + a0 - rsub0) >> shift;
+    }
+
+    function div(bytes32 x, bytes32 y, uint rnd) public pure returns (bytes32) {
+        if(isNaN(x)) return x;
+        if(isNaN(y)) return y;
+
+        (uint xS, uint xE, uint xF) = toParts(x);
+        (uint yS, uint yE, uint yF) = toParts(y);
+    }
 }
 
 
