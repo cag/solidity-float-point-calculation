@@ -1,4 +1,7 @@
 module.exports = {
-    "extends": "plugin:prettier/recommended",
-    "parserOptions": { "ecmaVersion": 8 }
+  extends: "plugin:prettier/recommended",
+  parser: "babel-eslint",
+  parserOptions: {
+    sourceType: "script"
+  }
 };
