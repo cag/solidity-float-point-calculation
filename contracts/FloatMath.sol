@@ -82,6 +82,8 @@ library FloatMath {
     uint constant FGRS_LIMIT = 1 << FGRS_LENGTH;
     uint constant FGRS_MASK = FGRS_LIMIT - 1;
 
+    bytes32 constant Q_NAN = bytes32(E_MASK | (1 << (E_SHIFT - 1)));
+
     function toParts(bytes32 x) internal pure returns (uint s, uint e, uint f) {
         e = (uint(x) & E_MASK) >> E_SHIFT;
         f = uint(x) & F_MASK;
@@ -160,7 +162,7 @@ library FloatMath {
 
     function addParts(uint xS, uint xE, uint xF, uint yS, uint yE, uint yF, uint rnd) internal pure returns (bytes32) {
         if(xE == E_MAX && yE == E_MAX && xS != yS) {
-            return bytes32(E_MASK | 1);
+            return Q_NAN;
         }
 
         if(xE < yE || xE == yE && xF < yF) {
@@ -224,7 +226,7 @@ library FloatMath {
         (uint yS, uint yE, uint yF) = toParts(y);
 
         if(xE == 0 && yE == E_MAX || yE == 0 && xE == E_MAX)
-            return bytes32(E_MASK | 1);
+            return Q_NAN;
 
         if(xE == E_MAX || yE == E_MAX)
             return bytes32((xS ^ yS) | E_MASK);
@@ -268,14 +270,14 @@ library FloatMath {
 
         if(yE == 0) {
             if(xE == 0)
-                return bytes32(E_MASK | 1);
+                return Q_NAN;
 
             return bytes32((xS ^ yS) | E_MASK);
         }
 
         if(yE == E_MAX) {
             if(xE == E_MAX) {
-                return bytes32(E_MASK | 1);
+                return Q_NAN;
             }
 
             return bytes32((xS ^ yS));

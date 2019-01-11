@@ -1,108 +1,16 @@
-const { mpf } = require("mp-wasm");
+const bf = require("big-float-wasm");
 const { randomHex, toBN } = web3.utils;
 const UintMath = artifacts.require("UintMath");
 const FloatMath = artifacts.require("FloatMath");
 
 const pow2To255 = toBN(2).pow(toBN(255));
 
-const floatenv = require("bindings")({
-  module_root: __dirname,
-  bindings: "floatenv"
-});
+bf.defaultPrecision = 237;
+bf.defaultExpnBits = 19;
 
-function bufferToBigInt(buffer) {
-  let ret = 0n;
-
-  for (const b of new Uint8Array(buffer)) {
-    ret = (ret << 8n) + BigInt(b);
-  }
-  return ret;
-}
-
-mpf.setDefaultPrec(256);
-const binExpMin = -262142;
-const binExpMax = 262145;
-
-let lastGRS;
 function toBytes32(x, opts) {
-  x = mpf(x, opts);
-  const roundingMode = (opts && opts.roundingMode) || 0;
-  const bs = new ArrayBuffer(32);
-  const bsView = new DataView(bs);
-  const binExp = x.getBinaryExponent();
-
-  const header =
-    ((x.isSignBitSet() ? 0x80000 : 0) |
-      ((Number.isNaN(binExp)
-        ? binExpMax
-        : Math.min(Math.max(binExp, binExpMin), binExpMax)) -
-        binExpMin)) <<
-    12;
-  bsView.setUint32(0, header);
-
-  let grs = 0;
-  if (Number.isNaN(binExp)) {
-    // this is the only NaN used
-    return "0x7ffff00000000000000000000000000000000000000000000000000000000001";
-  } else if (Number.isFinite(binExp) && binExp < binExpMax) {
-    const xBytes = x.getSignificandRawBytes();
-    const lastXByte = xBytes[xBytes.length - 1];
-    if (lastXByte & (0x80 === 0)) {
-      throw new Error(
-        `expected most significant bit of ${x} significand to be set but found ${lastXByte}`
-      );
-    }
-    bsView.setUint8(2, bsView.getUint8(2) | ((lastXByte & 0x7f) >> 3));
-    let i;
-    for (i = 1; i < xBytes.length && i < 30; i++) {
-      bsView.setUint8(
-        i + 2,
-        ((xBytes[xBytes.length - i] << 5) |
-          (xBytes[xBytes.length - i - 1] >> 3)) &
-          0xff
-      );
-    }
-
-    if (i < xBytes.length) grs = xBytes[xBytes.length - i] & 7;
-
-    for (i++; grs & (1 === 0) && i < xBytes.length; i++) {
-      if (xBytes[xBytes.length - i] != 0) grs |= 1;
-    }
-  }
-
-  let m = bufferToBigInt(bs);
-  const s = m & (1n << 255n);
-  if (Number.isFinite(binExp) && binExp <= binExpMin) {
-    const rshift = BigInt(binExpMin - binExp + 1);
-    console.log(m.toString(16), "rshift", rshift);
-    if (grs === 0 && (m & ((1n << (rshift - 3n)) - 1n)) === 0n)
-      grs = Number((m >> (rshift - 3n)) & 7n);
-    else grs = Number((m >> (rshift - 3n)) & 7n) | 1;
-
-    m = (((m ^ s) | (1n << 236n)) >> rshift) ^ s;
-  } else {
-    console.log(m.toString(16), "grs", grs);
-  }
-
-  if (
-    x.lgt(0) &&
-    Number.isFinite(binExp) &&
-    binExp < binExpMax &&
-    !(
-      ((roundingMode === 0 || roundingMode === "roundTiesToEven") &&
-        ((grs & 4) === 0 || ((grs & 3) === 0 && (m & 1n) === 0n))) ||
-      (roundingMode === 1 || roundingMode === "roundTowardZero") ||
-      ((roundingMode === 2 || roundingMode === "roundTowardPositive") &&
-        (s !== 0 || grs === 0)) ||
-      ((roundingMode === 3 || roundingMode === "roundTowardNegative") &&
-        (s === 0 || grs === 0))
-    )
-  ) {
-    m++;
-  }
-  lastGRS = grs;
-
-  return "0x" + m.toString(16).padStart(64, "0");
+  x = bf(x, opts)
+  return x.toIEEE754Hex(opts)
 }
 
 describe("toBytes32 helper", function() {
@@ -133,7 +41,7 @@ describe("toBytes32 helper", function() {
     );
     assert.equal(
       toBytes32(NaN),
-      "0x7ffff00000000000000000000000000000000000000000000000000000000001"
+      "0x7ffff80000000000000000000000000000000000000000000000000000000000"
     );
     assert.equal(
       toBytes32("0x1p-262142"),
@@ -197,13 +105,20 @@ contract("FloatMath", function(accounts) {
     floatMath = await FloatMath.new();
   });
 
+  const roundingModeNames = [
+    "roundTiesToEven",
+    "roundTowardZero",
+    "roundTowardPositive",
+    "roundTowardNegative"
+  ];
+
   it("can convert ints to floats", async function() {
     for (let i = 0; i < 10; i++) {
       const roundingMode = Math.floor(4 * Math.random());
       const x = toBN(randomHex(32)).sub(pow2To255);
       assert.equal(
         await floatMath.fromInt(x, roundingMode),
-        toBytes32(x, { roundingMode }),
+        toBytes32(x, { roundingMode: roundingModeNames[roundingMode] }),
         `${x} produced different binary256 bytes`
       );
     }
@@ -219,13 +134,6 @@ contract("FloatMath", function(accounts) {
     assert.equal(await floatMath.mul(x, zero, 0), zero);
     assert.equal(await floatMath.div(zero, x, 0), zero);
   });
-
-  const roundingModeNames = [
-    "roundTiesToEven",
-    "roundTowardZero",
-    "roundTowardPositive",
-    "roundTowardNegative"
-  ];
   const genParams = () =>
     [
       0,
@@ -238,18 +146,18 @@ contract("FloatMath", function(accounts) {
 
       Array.from({ length: 10 }, () => [
         // normal float
-        mpf(
+        // bf(
           `${Math.random() < 0.5 ? "-" : ""}0x1.${randomHex(30).slice(
             -59
           )}p${Math.floor(Math.random() * 0x7ffff) - 0x3fffe}`
-        ),
-
+        // ),
+        ,
         // subnormal float
-        mpf(
+        // bf(
           `${Math.random() < 0.5 ? "-" : ""}0x0.${randomHex(30).slice(
             -59
           )}p${-0x3fffe}`
-        )
+        // )
       ])
     ].flat(2);
   [["add", "+"], ["sub", "-"], ["mul", "*"], ["div", "/"]].forEach(
@@ -259,18 +167,17 @@ contract("FloatMath", function(accounts) {
           for (const y of genParams()) {
             const roundingMode = Math.floor(4 * Math.random());
             try {
-              const xb32 = toBytes32(x);
-              const yb32 = toBytes32(y);
-              const mpfOpts = {
-                roundingMode
-              };
+              const xbf = bf(x)
+              const ybf = bf(y)
+              const xb32 = xbf.toIEEE754Hex();
+              const yb32 = ybf.toIEEE754Hex();
+
               assert.equal(
                 await floatMath[op](xb32, yb32, roundingMode),
-                toBytes32(mpf[op](x, y, mpfOpts), mpfOpts),
+                xbf[op](ybf, { roundingMode: roundingModeNames[roundingMode] }).toIEEE754Hex(),
                 `${x} ${opSym} ${y}
       ${op}(${xb32}, ${yb32})
-      mismatch using rounding mode ${roundingModeNames[roundingMode]}
-      grs ${lastGRS}`
+      mismatch using rounding mode ${roundingModeNames[roundingMode]}`
               );
             } catch (e) {
               if (e.constructor.name === "AssertionError") throw e;
